@@ -119,3 +119,35 @@ await test('actual capture upload failure cannot certify a finished recording', 
     assert.equal(session.page.isClosed(), true);
   } finally { await recorder.cdp.detach().catch(() => {}); await session.close().catch(() => {}); await rm(outputDir, { recursive: true, force: true }); }
 });
+
+await test('WAV startup settles within its operation bound when the application document is paused', { timeout: 60000 }, async () => {
+  const { neutral, tone } = await import('./helpers.mjs');
+  const { setTimeout: sleep } = await import('node:timers/promises');
+  const outputDir = await mkdtemp(join(tmpdir(), 'audio-paused-document-'));
+  const session = await createVoiceBrowserSession({ origin: 'https://neutral.invalid', outputDir, operationTimeoutMs: 1000 });
+  const cdp = await session.context.newCDPSession(session.page);
+  let startup;
+  try {
+    await neutral(session);
+    await tone(join(outputDir, 'tone.wav'), 440, 0.3);
+    await cdp.send('Debugger.enable');
+    const paused = new Promise(resolve => cdp.once('Debugger.paused', resolve));
+    await cdp.send('Debugger.pause');
+    await paused;
+    startup = session.playWav(join(outputDir, 'tone.wav'));
+    const result = await Promise.race([
+      startup.then(() => ({ state: 'fulfilled' }), error => ({ state: 'rejected', error })),
+      sleep(2500).then(() => ({ state: 'pending' })),
+    ]);
+    assert.equal(result.state, 'rejected', 'An unavailable document must not leave WAV startup pending beyond its configured operation bound');
+    assert.match(String(result.error), /exceeded 1000ms/);
+    await cdp.send('Debugger.resume');
+    assert.deepEqual((await session.readState()).clips, [], 'A timed-out startup must not begin playing when the document resumes');
+  } finally {
+    await cdp.send('Debugger.resume').catch(() => {});
+    await startup?.catch(() => {});
+    await cdp.detach().catch(() => {});
+    await session.close();
+    await rm(outputDir, { recursive: true, force: true });
+  }
+});

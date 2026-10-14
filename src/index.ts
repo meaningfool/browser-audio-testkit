@@ -484,9 +484,16 @@ export async function createVoiceBrowserSession(
         await available("Play WAV");
         atOrigin("Play WAV");
         // A JSHandle is bound to one execution context: it cannot address reused IDs after navigation.
-        const document = (await page.evaluateHandle(
-          "window.__voiceBrowser",
-        )) as JSHandle<{
+        const pendingDocument = page.evaluateHandle("window.__voiceBrowser");
+        const document = (await bounded(
+          pendingDocument,
+          "Prepare microphone playback document",
+          timeout,
+        ).catch((error) => {
+          // A late evaluation may still allocate a handle after the caller times out.
+          void pendingDocument.then((handle) => handle.dispose()).catch(() => undefined);
+          throw error;
+        })) as JSHandle<{
           playWav(input: {
             id: string;
             base64: string;

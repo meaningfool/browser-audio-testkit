@@ -114,7 +114,8 @@ capture. Frequencies emitted before and after the selected interval must remain
 absent after a 250ms source-settling allowance before recording. Checks also cover
 optional recording without artifacts, same/full navigation, document interruption,
 concurrent lifecycle calls, microphone cutoff, media playback controls, upload and
-file-allocation failures, missing-browser setup and cleanup after consumer failure.
+file-allocation failures, bounded startup with a paused document, missing-browser
+setup and cleanup after consumer failure.
 Silent/live routing is checked through the real browser’s
 WebAudio output connection and native active tab capture, independently of the
 library’s monitoring flag, before first navigation and after finishing. Destroying
