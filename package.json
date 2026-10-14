@@ -1,0 +1,34 @@
+{
+  "name": "@meaningfool/browser-audio-testkit",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Owned Chromium microphone playback and live tab audio recording for browser tests",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "tsc --noEmit",
+    "test": "node scripts/verify-packed.mjs",
+    "prepack": "pnpm build"
+  },
+  "dependencies": {
+    "playwright": "1.63.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "26.0.0",
+    "typescript": "5.9.3"
+  },
+  "packageManager": "pnpm@10.13.1"
+}
