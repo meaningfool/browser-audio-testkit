@@ -51,6 +51,7 @@
   let microphoneSource;
   const tracks = [];
   const clipRecords = new Map();
+  const usedClipIds = new Set();
   const audioElements = new Set();
   const remoteMeters = new Map();
   let observerContext;
@@ -232,7 +233,9 @@
       updateMeter(state.microphone, liveMicrophone() ? values : { rms: 0, peak: 0 });
     }
   }
-  navigator.mediaDevices.getUserMedia = async (constraints) => {
+  // Non-secure documents (including about:blank) may not expose mediaDevices.
+  // Playback stopping and state remain available after leaving the configured origin.
+  if (navigator.mediaDevices) navigator.mediaDevices.getUserMedia = async (constraints) => {
     if (!constraints?.audio || constraints.video) {
       throw new Error(
         "Voice browser supports only synthetic audio microphone requests; physical devices are unavailable",
@@ -265,11 +268,14 @@
       return structuredClone(state);
     },
     async playWav({ id, base64, requireLiveMicrophone }) {
-      if (clipRecords.has(id)) throw new Error(`Voice clip ID already used: ${id}`);
+      if (usedClipIds.has(id)) throw new Error(`Voice clip ID already used: ${id}`);
+      usedClipIds.add(id);
       const ctx = ensureContext();
       const bytes = Uint8Array.from(atob(base64), (character) => character.charCodeAt(0));
       const buffer = await ctx.decodeAudioData(bytes.buffer);
+      ensureContext();
       await ctx.resume();
+      ensureContext();
       if (requireLiveMicrophone && !liveMicrophone())
         throw new Error("Synthetic microphone is not enabled and live");
       const source = ctx.createBufferSource();
@@ -348,6 +354,7 @@
     async dispose() {
       if (state.disposed) return this.state();
       this.stopPlayback();
+      state.disposed = true;
       clearInterval(timer);
       // Silence current and removed app audio before tabCapture restores local playback.
       for (const element of document.querySelectorAll("audio,video")) audioElements.add(element);

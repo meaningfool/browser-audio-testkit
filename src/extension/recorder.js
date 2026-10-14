@@ -12,6 +12,7 @@ let uploadError;
 let recordingStopped;
 
 function sample() {
+  if (!metadata || recorder.state !== "recording") return;
   const samples = new Float32Array(analyser.fftSize);
   analyser.getFloatTimeDomainData(samples);
   let squares = 0;
@@ -37,10 +38,14 @@ function sample() {
   }
 }
 
-async function start(message) {
-  uploadUrl = message.uploadUrl;
+async function activate(message) {
   stream = await navigator.mediaDevices.getUserMedia({
-    audio: { mandatory: { chromeMediaSource: "tab", chromeMediaSourceId: message.streamId } },
+    audio: {
+      mandatory: {
+        chromeMediaSource: "tab",
+        chromeMediaSourceId: message.streamId,
+      },
+    },
     video: false,
   });
   if (stream.getAudioTracks().length !== 1 || stream.getVideoTracks().length)
@@ -53,6 +58,18 @@ async function start(message) {
   // With no monitor, tabCapture diverts local playback and the host remains silent.
   if (message.listenLive) source.connect(captureContext.destination);
   await captureContext.resume();
+  stream.getAudioTracks()[0].addEventListener("ended", () => {
+    void chrome.runtime.sendMessage({
+      target: "controller",
+      type: "captureLost",
+    });
+  });
+  return { monitorConnected: message.listenLive };
+}
+
+async function start(message) {
+  uploadUrl = message.uploadUrl;
+  if (!stream?.active) throw new Error("Tab capture is no longer live");
   recorder = new MediaRecorder(stream, {
     mimeType: "audio/webm;codecs=opus",
     audioBitsPerSecond: 128000,
@@ -101,7 +118,8 @@ async function start(message) {
           body: data,
           signal: AbortSignal.timeout(10000),
         });
-        if (!response.ok) throw new Error(`Capture chunk upload failed: ${response.status}`);
+        if (!response.ok)
+          throw new Error(`Capture chunk upload failed: ${response.status}`);
         metadata.uploadedAtUnixMs = Date.now();
       })
       .catch((error) => {
@@ -119,12 +137,16 @@ async function start(message) {
       },
       { once: true },
     );
-    recorder.addEventListener("error", ({ error }) => reject(error), { once: true });
+    recorder.addEventListener("error", ({ error }) => reject(error), {
+      once: true,
+    });
   });
   void recordingStopped.catch(() => undefined);
   await new Promise((resolve, reject) => {
     recorder.addEventListener("start", resolve, { once: true });
-    recorder.addEventListener("error", ({ error }) => reject(error), { once: true });
+    recorder.addEventListener("error", ({ error }) => reject(error), {
+      once: true,
+    });
     recorder.start(250);
   });
   timer = setInterval(sample, 20);
@@ -143,20 +165,35 @@ async function stop() {
     if (!metadata.bytes) throw new Error("Browser produced an empty capture");
     return metadata;
   } finally {
-    stream.getTracks().forEach((track) => track.stop());
-    source.disconnect();
-    await captureContext.close();
+    clearInterval(timer);
   }
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   if (message.target !== "recorder") return;
   const operation =
-    message.type === "start"
-      ? start(message)
-      : message.type === "stop"
-        ? stop()
-        : Promise.reject(new Error("Unknown recorder operation"));
+    message.type === "activate"
+      ? activate(message)
+      : message.type === "silence"
+        ? Promise.resolve().then(() => {
+            try {
+              source?.disconnect(captureContext.destination);
+            } catch (error) {
+              if (error.name !== "InvalidAccessError") throw error;
+            }
+          })
+        : message.type === "release"
+          ? (async () => {
+              clearInterval(timer);
+              stream?.getTracks().forEach((track) => track.stop());
+              source?.disconnect();
+              await captureContext?.close();
+            })()
+          : message.type === "start"
+            ? start(message)
+            : message.type === "stop"
+              ? stop()
+              : Promise.reject(new Error("Unknown recorder operation"));
   operation.then(
     (result) => respond({ ok: true, metadata: result }),
     (error) => respond({ ok: false, error: String(error) }),

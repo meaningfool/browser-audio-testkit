@@ -4,49 +4,55 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createVoiceBrowserSession } from '@meaningfool/browser-audio-testkit';
+import { captureTarget, neutral, waitFor } from './helpers.mjs';
 
 for (const listenLive of [false, true]) {
-  await test(`native capture output routing with listenLive=${listenLive}`, { timeout: 60000 }, async () => {
+  await test(`native routing exists before navigation and persists after finish, listenLive=${listenLive}`, { timeout: 60000 }, async () => {
     const outputDir = await mkdtemp(join(tmpdir(), 'audio-routing-'));
     const session = await createVoiceBrowserSession({ origin: 'https://neutral.invalid', outputDir, listenLive });
-    const cdp = await session.context.browser().newBrowserCDPSession();
+    const recorder = await captureTarget(session);
     try {
-      await session.context.route('https://neutral.invalid/**', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><body></body>' }));
-      await session.page.goto('https://neutral.invalid/');
+      // Native disconnect(destination) throws when the edge does not exist. This
+      // independent browser observation verifies routing, not physical host volume.
+      const probe = () => recorder.evaluate(`(() => {
+        try { source.disconnect(captureContext.destination); }
+        catch (error) { if (error.name === 'InvalidAccessError') return false; throw error; }
+        source.connect(captureContext.destination); return true;
+      })()`);
+      assert.equal(await probe(), listenLive, 'Factory must prepare listening before exposing the page');
+      const tabs = () => session.context.serviceWorkers()[0].evaluate('chrome.tabCapture.getCapturedTabs()');
+      const activeTabs = (await tabs()).filter(tab => tab.status === 'active');
+      assert.equal(activeTabs.length, 1);
+      const tabId = activeTabs[0].tabId;
+      await neutral(session, `<!doctype html><body><script>
+        window.audioReady = (async () => {
+          const context = new AudioContext(); await context.resume();
+          const oscillator = context.createOscillator(); oscillator.connect(context.destination); oscillator.start();
+          return context.state;
+        })();
+      </script>`);
+      assert.equal(await session.page.evaluate('audioReady'), 'running', 'Immediate first-navigation autoplay must run');
+      assert.equal(await probe(), listenLive);
       await session.startRecording();
-      const { targetInfos } = await cdp.send('Target.getTargets');
-      const target = targetInfos.find(target => target.type === 'background_page' && target.url.endsWith('/recorder.html'));
-      assert.ok(target, 'Chromium must expose the actual capture document');
-      const { sessionId } = await cdp.send('Target.attachToTarget', { targetId: target.targetId, flatten: false });
-      const result = new Promise((resolve, reject) => {
-        cdp.on('Target.receivedMessageFromTarget', event => {
-          if (event.sessionId !== sessionId) return;
-          const message = JSON.parse(event.message);
-          if (message.id !== 1) return;
-          if (message.error || message.result.exceptionDetails) reject(new Error(JSON.stringify(message)));
-          else resolve(message.result.result.value);
-        });
-      });
-      // Native disconnect(destination) throws InvalidAccessError when that edge
-      // does not exist. Probe the real output edge and restore it if present;
-      // this reads browser routing independently of monitorConnected metadata.
-      await cdp.send('Target.sendMessageToTarget', {
-        sessionId,
-        message: JSON.stringify({ id: 1, method: 'Runtime.evaluate', params: {
-          expression: `(() => {
-            try { source.disconnect(captureContext.destination); }
-            catch (error) { if (error.name === 'InvalidAccessError') return false; throw error; }
-            source.connect(captureContext.destination);
-            return true;
-          })()`, returnByValue: true,
-        } }),
-      });
-      assert.equal(await result, listenLive);
-      const capturedTabs = await session.context.serviceWorkers()[0].evaluate('chrome.tabCapture.getCapturedTabs()');
-      assert.equal(capturedTabs.filter(tab => tab.status === 'active').length, 1, 'Chromium must actually divert one captured tab');
+      await session.stopRecording();
+      assert.equal(await probe(), listenLive, 'Finishing must retain listening policy');
+      // Destroy the real capture document through the browser, without sending a
+      // library-specific loss notification. Native tab state must suppress output.
+      await recorder.cdp.send('Target.closeTarget', { targetId: recorder.target.targetId });
+      await waitFor(async () => {
+        if (session.page.isClosed()) return true;
+        const owned = await session.context.serviceWorkers()[0].evaluate('chrome.tabs.query({})');
+        return owned.some(tab => tab.id === tabId && tab.mutedInfo.muted);
+      }, Boolean, 'Capture loss must close or natively mute the owned tab');
+      await assert.rejects(session.readState(), /capture|closed|failed|lost/i);
+      const releases = await Promise.allSettled([session.close(), session.close()]);
+      assert.equal(releases[0].status, 'rejected');
+      assert.equal(releases[1].status, 'rejected');
+      assert.equal(releases[0].reason, releases[1].reason);
+      assert.equal(session.page.isClosed(), true);
     } finally {
-      await cdp.detach();
-      await session.close();
+      await recorder.cdp.detach().catch(() => {});
+      await session.close().catch(() => {});
       await rm(outputDir, { recursive: true, force: true });
     }
   });
