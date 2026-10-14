@@ -1,12 +1,16 @@
 {
   "name": "@meaningfool/browser-audio-testkit",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "description": "Owned Chromium microphone playback and live tab audio recording for browser tests",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./playwright": {
+      "types": "./dist/playwright.d.ts",
+      "import": "./dist/playwright.js"
     }
   },
   "files": [
@@ -20,15 +24,24 @@
     "build": "node scripts/build.mjs",
     "check": "tsc --noEmit",
     "test": "node scripts/verify-packed.mjs",
-    "prepack": "pnpm build"
+    "prepack": "pnpm build",
+    "verify:artifact": "node scripts/verify-packed.mjs",
+    "release:candidate": "node scripts/release-candidate.mjs"
   },
   "dependencies": {
+    "@playwright/test": "1.63.0",
     "playwright": "1.63.0",
+    "playwright-core": "1.63.0",
     "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/node": "26.0.0",
     "typescript": "5.9.3"
   },
-  "packageManager": "pnpm@10.13.1"
+  "packageManager": "pnpm@10.13.1",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/meaningfool/browser-audio-testkit.git"
+  }
 }
