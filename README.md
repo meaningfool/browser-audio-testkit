@@ -5,11 +5,10 @@ one ordinary Playwright page. It supplies WAV microphone input and captures the
 tab's live audio to WebM/Opus. It requires no application services or provider
 account.
 
-This is the extraction baseline for
-[EventPulse #686](https://github.com/meaningfool/eventpulse/issues/686).
-Playback requires active recording. Finishing recording disposes page audio;
-playback cannot resume afterward. Independent audio lifetimes and the optional
-Playwright fixture are subsequent work, not supported by this version.
+Microphone playback, listening and recording have independent lifetimes. Capture
+routing is prepared on an inert bootstrap before the page is exposed, so the
+first application navigation obeys the listening policy. Recording is optional
+and saves one selected interval. The Playwright fixture is subsequent work.
 
 ## Use a local packed build
 
@@ -22,45 +21,69 @@ npm install /tmp/meaningfool-browser-audio-testkit-0.0.0.tgz
 ```
 
 ```ts
-import { createVoiceBrowserSession } from '@meaningfool/browser-audio-testkit';
+import { createVoiceBrowserSession } from "@meaningfool/browser-audio-testkit";
 
 const session = await createVoiceBrowserSession({
-  origin: 'https://application.example',
-  outputDir: '/absolute/path/to/unique-output',
+  origin: "https://application.example",
+  outputDir: "/absolute/path/to/unique-output",
 });
 try {
-  await session.page.goto('https://application.example/');
-  await session.startRecording();
+  await session.page.goto("https://application.example/");
   // The application's own getUserMedia({audio:true}) receives the synthetic mic.
-  const clip = await session.playWav('/absolute/path/to/input.wav', {
+  const clip = await session.playWav("/absolute/path/to/input.wav", {
     requireLiveMicrophone: true,
   });
+  // Start saving while the clip and application output are already running.
+  await session.startRecording();
   console.log(await clip.progress());
   console.log(await clip.completed);
   console.log(await session.readState());
   const recording = await session.stopRecording();
-  console.log(recording.capturePath);
+  console.log(
+    recording.capturePath,
+    recording.bytes,
+    recording.stoppedAtUnixMs,
+  );
+  // Finishing preserves audio and listening. Further clips remain usable.
+  await (
+    await session.playWav("/absolute/path/to/another.wav")
+  ).completed;
 } finally {
   await session.close();
 }
 ```
 
-The output directory must not already contain `capture.webm`. The session writes
-that file plus `capture.json`, with restricted file permissions. The caller owns
-retention and unique output paths. The baseline creates the capture file during
-setup, even when recording is never started. One recording is supported per
-session. `close()` is repeatable and flushes active recording before releasing the
-browser, temporary profile, upload server and file handle. Setup and teardown
-errors reject; preserve a test's original failure if cleanup also rejects.
+The caller owns unique output paths and artifact retention. The session creates
+`capture.webm` and `capture.json` with restricted permissions only when recording
+is requested, and rejects existing files. A session that never records leaves
+no capture artifacts. Only one recording is supported. `RecordingMetadata` is
+`RecordingStarted | RecordingFinished`; numeric byte/chunk counts are always
+present, and final timestamps are required on the finished variant. Finalization
+verifies accepted bytes, closes the capture and persists metadata before success.
+
+`close()` is repeatable and flushes active recording before releasing the browser,
+temporary profile, upload server and file handles. Finishing before recording
+starts rejects without preventing a later start. Concurrent starts allocate at
+most one recorder; repeated finish and release share their result or failure.
+Setup and teardown errors reject; preserve a test's original failure if cleanup
+also rejects. Capture loss fails the environment and mutes or closes the owned tab;
+recovered partial bytes are never reported as a successful finished recording.
 
 `showBrowser` and `listenLive` default to false and are independent options.
-Successful active tab capture diverts host playback; `listenLive: true` connects
-the captured stream to the extension's output. This baseline's silent guarantee
-starts with recording activation: navigate an inert page and start recording
-before application audio. It does not suppress immediate page sound before that
-point. `ignoreHTTPSErrors` defaults to false. `operationTimeoutMs` defaults to
-10,000 and accepts a positive value up to 60,000. The core `origin` guards recording
-startup; it is not Playwright's `baseURL`.
+Persistent native tab capture diverts local playback; `listenLive: true` connects
+the captured stream to the extension's output. Routing remains active before,
+during and after recording. `ignoreHTTPSErrors` defaults to false.
+`operationTimeoutMs` defaults to 10,000 and accepts a positive finite value up to
+60,000. Browser launch has a 30-second budget; capture activation/flush and context
+close have 15-second budgets; server close has a 3-second budget. Clip completion
+is bounded by its decoded duration plus 10 seconds.
+
+The core `origin` guards WAV playback and recording startup; it is not Playwright's
+`baseURL`. Navigation and authentication remain consumer-owned. Finalization,
+stopping and release remain available after leaving that origin. Same-document
+navigation preserves clips; full navigation prepares fresh document-local state.
+Old clip handles reject on interruption and cannot address a new document's reused
+ID. Active tab recording survives ordinary navigation on the same exposed Page.
 
 The exposed `context` accepts ordinary routing, permissions and other Playwright
 configuration. This session does not inherit a test runner's launch/context
@@ -87,10 +110,17 @@ sends it to a real WebRTC receiver, verifies continued received silence using
 RTP/sample/concealment statistics, exercises progress and stopping, observes a
 MediaStream-backed audio element, and decodes the actual tab recording with
 `ffmpeg`. An independent 880 Hz page oscillator must also be present in that
-capture. Separate checks cover missing-browser setup and cleanup after a
-consumer failure. Silent/live routing is checked through the real browser’s
+capture. Frequencies emitted before and after the selected interval must remain
+absent after a 250ms source-settling allowance before recording. Checks also cover
+optional recording without artifacts, same/full navigation, document interruption,
+concurrent lifecycle calls, microphone cutoff, media playback controls, upload and
+file-allocation failures, bounded startup with a paused document, missing-browser
+setup and cleanup after consumer failure.
+Silent/live routing is checked through the real browser’s
 WebAudio output connection and native active tab capture, independently of the
-library’s monitoring flag; this is browser routing evidence, not a host speaker
+library’s monitoring flag, before first navigation and after finishing. Destroying
+the native capture document must mute or close the tab and reject new audio work.
+This is browser routing evidence, not a host speaker
 recording. Tests require `ffmpeg` on PATH and a Chromium download.
 
 The tested combination is Node 26.0.0, Playwright 1.63.0, and its bundled full
@@ -109,7 +139,8 @@ Extracted from `meaningfool/eventpulse`, revision
 The injected microphone script and complete extension are retained. Names and
 imports are generic; application speech, authentication, services, provider
 interpretation and retention remain consumer-owned. No source LICENSE, NOTICE
-or copyright headers were present in the extracted directory. License and
-versioned distribution are pending the explicit release decision in
+or copyright headers were present in the extracted directory. MIT licensing and
+a versioned `.tgz` GitHub Release asset were selected for
 [EventPulse #688](https://github.com/meaningfool/eventpulse/issues/688).
-This package has not been published to a registry.
+The license file and first release are delivered by that issue; the first release
+will not use npm. This package has not been published to a registry.

@@ -11,7 +11,7 @@ await test("failed setup releases profile and capture file", async () => {
   try {
     await assert.rejects(createVoiceBrowserSession({ origin: "https://neutral.invalid", outputDir }), /Executable doesn't exist/);
     assert.deepEqual((await readdir(tmpdir())).filter(name => name.startsWith("browser-audio-testkit-") && !before.includes(name)), []);
-    await rm(join(outputDir, "capture.webm"));
+    assert.deepEqual(await readdir(outputDir), []);
   } finally {
     await rm(outputDir, { recursive: true, force: true });
   }

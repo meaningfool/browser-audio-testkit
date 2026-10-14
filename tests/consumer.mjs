@@ -7,10 +7,12 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { createVoiceBrowserSession } from "@meaningfool/browser-audio-testkit";
 import { writeFile, readdir, stat } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
+import { tone, waitFor } from "./helpers.mjs";
 
 // Run explicitly with node --test. This uses neither application services nor a provider.
+for (const listenLive of [false, true]) {
 await test(
-  "synthetic microphone sends silence over WebRTC after a finite tone clip",
+  `independent microphone/recording sends real WebRTC silence, listenLive=${listenLive}`,
   { timeout: 60000 },
   async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "browser-audio-verification-"));
@@ -28,6 +30,7 @@ await test(
     const session = await createVoiceBrowserSession({
       origin: "https://voice-browser-verification.invalid",
       outputDir,
+      listenLive,
     });
     try {
       await session.context.route("https://voice-browser-verification.invalid/**", (route) =>
@@ -37,7 +40,7 @@ await test(
         }),
       );
       await session.page.goto("https://voice-browser-verification.invalid/rtc");
-      await session.startRecording();
+      await assert.rejects(session.stopRecording(), /record/i);
       await session.page.evaluate(String.raw`(async () => {
       const sender = new RTCPeerConnection();
       const receiver = new RTCPeerConnection();
@@ -84,6 +87,7 @@ await test(
         maxRms = Math.max(maxRms, rms);
       }, 20);
       window.microphoneVerification = {
+        microphone, audio,
         async snapshot() {
           const sendStats = [...await sender.getStats()].map((entry) => entry[1]);
           const receiveStats = [...await receiver.getStats()].map((entry) => entry[1]);
@@ -107,7 +111,7 @@ await test(
       assert.equal((await session.readState()).track.readyState, "live");
       await session.page.evaluate(`(() => {
         const context = new AudioContext();
-        const oscillator = context.createOscillator(); oscillator.frequency.value = 880;
+        const oscillator = context.createOscillator(); oscillator.frequency.value = 1500;
         const gain = context.createGain(); gain.gain.value = 0.1;
         oscillator.connect(gain); gain.connect(context.destination); oscillator.start();
         window.outputTone = { context, oscillator };
@@ -166,17 +170,53 @@ await test(
       const incoming = (await session.readState()).incoming;
       assert.ok(incoming.hasStream && incoming.connectedToDocument);
       assert.ok(incoming.playingEvents > 0 && incoming.maxRms > 0.001);
+      assert.ok(!(await readdir(outputDir)).some(name => name.startsWith("capture.")), "Playback without recording must allocate no capture artifact");
+      await session.page.evaluate("outputTone.oscillator.frequency.value = 880");
+      await sleep(250); // Allow ordinary tab/media buffering to drain before the selected interval.
       const stopped = await session.playWav(join(outputDir, "tone.wav"), { id: "stopped" });
+      await sleep(200);
+      assert.equal((await stopped.progress()).state, "playing");
+      const starts = await Promise.allSettled([session.startRecording(), session.startRecording()]);
+      assert.equal(starts.filter(result => result.status === "fulfilled").length, 1);
+      assert.equal(starts.filter(result => result.status === "rejected").length, 1);
       await sleep(200);
       assert.equal((await stopped.stop()).state, "stopped");
       assert.equal((await stopped.completed).state, "stopped");
-      await session.stopPlayback();
-      const recording = await session.stopRecording();
+      assert.equal((await stopped.stop()).state, "stopped");
+      const active = await session.playWav(join(outputDir, "tone.wav"), { id: "through-finish" });
+      await waitFor(() => session.readState(), state => state.incoming.active, "Incoming RTP audio must become active");
+      for (const [change, field, expected] of [
+        ["audio.muted = true", "muted", true], ["audio.muted = false; audio.volume = 0", "volume", 0], ["audio.volume = 0.1; audio.pause()", "paused", true],
+      ]) {
+        await session.page.evaluate(`(() => { const {audio} = microphoneVerification; ${change}; })()`);
+        const state = await waitFor(() => session.readState(), value => value.incoming[field] === expected && !value.incoming.active, "Incoming activity must follow media controls");
+        assert.equal(state.incoming.active, false);
+      }
+      await session.page.evaluate("microphoneVerification.audio.play()");
+      await waitFor(() => session.readState(), state => state.incoming.active, "Incoming must resume independently of recording");
+      const finishes = await Promise.all([session.stopRecording(), session.stopRecording()]);
+      const recording = finishes[0];
+      assert.equal(finishes[1], recording);
+      assert.equal((await active.progress()).state, "playing");
+      assert.equal((await session.readState()).track.readyState, "live");
+      assert.equal(await session.page.evaluate("outputTone.context.state"), "running");
+      await active.completed;
       assert.equal(recording.state, "finished");
       assert.ok(recording.bytes > 1000);
       assert.equal((await stat(recording.capturePath)).size, recording.bytes);
       assert.equal(await session.stopRecording(), recording);
-      await assert.rejects(session.playWav(join(outputDir, "tone.wav")), /Start live tab capture/);
+      await assert.rejects(session.startRecording(), /record/i);
+      await tone(join(outputDir, "after.wav"), 2200);
+      await session.page.evaluate("outputTone.oscillator.frequency.value = 2200");
+      const afterClip = await session.playWav(join(outputDir, "after.wav"), { id: "after" });
+      await sleep(200);
+      await session.page.evaluate("microphoneVerification.microphone.enabled = false");
+      const cutoff = await waitFor(() => afterClip.progress(), state => state.microphoneCutoffSeconds !== null, "Microphone cutoff must be observed locally");
+      assert.ok(cutoff.microphoneCutoffSeconds >= 0 && cutoff.microphoneCutoffSeconds < 1.5);
+      assert.equal((await afterClip.completed).state, "completed");
+      await assert.rejects(session.playWav(join(outputDir, "tone.wav"), { requireLiveMicrophone: true }), /microphone/i);
+      await session.page.evaluate("microphoneVerification.microphone.stop()");
+      assert.equal((await session.readState()).track.readyState, "ended");
       const pcm = execFileSync("ffmpeg", ["-v", "error", "-i", recording.capturePath, "-f", "f32le", "-ac", "1", "-ar", "48000", "pipe:1"], { maxBuffer: 20_000_000 });
       const signal = new Float32Array(pcm.buffer, pcm.byteOffset, pcm.byteLength / 4);
       // Frequency-selective independent decode proves both microphone reference and live page output.
@@ -192,10 +232,11 @@ await test(
         }
         return peak;
       }
+      console.log(JSON.stringify({ browser: session.browserVersion, recordingBytes: recording.bytes, microphoneAmplitude: amplitude(440), outputAmplitude: amplitude(880), preIntervalAmplitude: amplitude(1500), postIntervalAmplitude: amplitude(2200) }));
       assert.ok(amplitude(440) > 0.03, "Recording must contain microphone reference at 440 Hz");
       assert.ok(amplitude(880) > 0.03, "Recording must contain independently generated tab output at 880 Hz");
-      assert.ok(amplitude(1500) < 0.005, "Unrelated frequency must remain absent");
-      console.log(JSON.stringify({ browser: session.browserVersion, recordingBytes: recording.bytes, microphoneAmplitude: amplitude(440), outputAmplitude: amplitude(880) }));
+      assert.ok(amplitude(1500) < 0.005, "Pre-interval application output must remain absent");
+      assert.ok(amplitude(2200) < 0.005, "Post-interval microphone and application output must remain absent");
     } finally {
       await session.close();
       await session.close();
@@ -206,3 +247,5 @@ await test(
     }
   },
 );
+
+}

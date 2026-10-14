@@ -1,162 +1,172 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, rm } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { createServer } from "node:http";
-import type { IncomingMessage, ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
-import type { BrowserContext, Worker } from "playwright";
-import { z } from "zod";
+import type { BrowserContext, JSHandle } from "playwright";
 import type {
   ClipPlayback,
-  RecordingMetadata,
-  VoiceBrowserOptions,
+  RecordingStarted,
+  RecordingFinished,
   VoiceBrowserSession,
+  VoiceBrowserOptions,
   VoiceBrowserState,
 } from "./types.js";
-
 export type {
   AudioMeter,
   ClipPlayback,
   MicrophoneTrack,
   PlayWavOptions,
+  RecordingStarted,
+  RecordingFinished,
   RecordingMetadata,
   VoiceBrowserOptions,
   VoiceBrowserSession,
   VoiceBrowserState,
   VoiceClip,
 } from "./types.js";
-
 const bundle = dirname(fileURLToPath(import.meta.url));
-const extension = join(bundle, "extension");
-const targetsSchema = z.object({
-  targetInfos: z.array(
-    z.object({
-      targetId: z.string(),
-      url: z.string(),
-    }),
-  ),
-});
-type CaptureMetadata = Omit<RecordingMetadata, "capturePath">;
-type RecorderStatus =
-  | CaptureMetadata
-  | { state: "idle" | "starting" }
-  | { state: "failed"; error: string };
-
-async function bounded<T>(operation: Promise<T>, label: string, timeoutMs: number): Promise<T> {
+async function bounded<T>(
+  operation: Promise<T>,
+  label: string,
+  timeout: number,
+): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       operation,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(`${label} exceeded ${timeoutMs}ms`)), timeoutMs);
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${label} exceeded ${timeout}ms`)),
+          timeout,
+        );
       }),
     ]);
+  } catch (cause) {
+    throw new Error(
+      `${label}: ${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause },
+    );
   } finally {
     clearTimeout(timer);
   }
 }
 
-/** Owns one isolated Chromium profile. The caller owns suite locking and artifact retention. */
+/** Owns one isolated Chromium profile, one tab and an optional recording interval. */
 export async function createVoiceBrowserSession(
   options: VoiceBrowserOptions,
 ): Promise<VoiceBrowserSession> {
   const origin = new URL(options.origin).origin;
-  if (!/^https?:/.test(origin)) throw new Error("Voice browser origin must use HTTP or HTTPS");
-  const timeoutMs = options.operationTimeoutMs ?? 10000;
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 60000) {
-    throw new Error("Voice browser operation timeout must be between 1 and 60000ms");
-  }
+  if (!/^https?:/.test(origin))
+    throw new Error("Voice browser origin must use HTTP or HTTPS");
+  const timeout = options.operationTimeoutMs ?? 10000;
+  if (!Number.isFinite(timeout) || timeout <= 0 || timeout > 60000)
+    throw new Error(
+      "Voice browser operation timeout must be between 1 and 60000ms",
+    );
   const outputDir = resolve(options.outputDir);
-  await mkdir(outputDir, { recursive: true });
   const capturePath = join(outputDir, "capture.webm");
-  const captureFile = await open(capturePath, "wx", 0o600);
+  let captureFile: FileHandle | undefined;
+  let metadataFile: FileHandle | undefined;
   let bytesReceived = 0;
   let uploadFailure: Error | undefined;
-  const uploadRoute = `/capture/${randomUUID()}`;
   let profile: string | undefined;
   let context: BrowserContext | undefined;
-  let worker: Worker | undefined;
-  let tabId: number | undefined;
-  let started = false;
-  let recording: RecordingMetadata | undefined;
-  let stopPromise: Promise<RecordingMetadata> | undefined;
-  let closePromise: Promise<void> | undefined;
-  let disposed = false;
-  let fileClosed = false;
   let browserClosed = false;
   let serverStarted = false;
-
-  async function receive(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    try {
-      if (request.method !== "POST" || request.url !== uploadRoute) {
-        response.writeHead(404);
-        response.end();
-        return;
-      }
-      for await (const chunk of request) {
-        if (!Buffer.isBuffer(chunk)) throw new Error("Capture upload was not a byte stream");
-        bytesReceived += chunk.length;
-        if (bytesReceived > 100_000_000) throw new Error("Live capture exceeded 100 MB limit");
-        await captureFile.writeFile(chunk);
-      }
-      response.writeHead(200);
-      response.end("saved");
-    } catch (error) {
-      uploadFailure = new Error(
-        `Live capture upload failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      if (!response.headersSent) response.writeHead(500);
-      response.end("capture upload failed");
-    }
-  }
+  const uploadRoute = `/capture/${randomUUID()}`;
+  const bootstrapRoute = `/bootstrap/${randomUUID()}`;
   const server = createServer((request, response) => {
-    void receive(request, response);
+    void (async () => {
+      try {
+        if (request.method === "GET" && request.url === bootstrapRoute) {
+          response.writeHead(200, { "Content-Type": "text/html" });
+          response.end(
+            "<!doctype html><title>Browser audio preparation</title>",
+          );
+          return;
+        }
+        if (
+          request.method !== "POST" ||
+          request.url !== uploadRoute ||
+          !captureFile
+        ) {
+          response.writeHead(404);
+          response.end();
+          return;
+        }
+        for await (const chunk of request) {
+          if (!Buffer.isBuffer(chunk))
+            throw new Error("Capture upload was not a byte stream");
+          if (bytesReceived + chunk.length > 100_000_000)
+            throw new Error("Live capture exceeded 100 MB limit");
+          await captureFile.writeFile(chunk);
+          bytesReceived += chunk.length;
+        }
+        response.writeHead(200);
+        response.end("saved");
+      } catch (cause) {
+        uploadFailure = new Error(`Live capture upload failed: ${cause}`, {
+          cause,
+        });
+        if (!response.headersSent) response.writeHead(500);
+        response.end("capture upload failed");
+      }
+    })();
   });
-
-  async function closeCaptureFile(file: FileHandle): Promise<void> {
-    if (fileClosed) return;
-    try {
-      await file.sync();
-    } finally {
-      await file.close();
-      fileClosed = true;
-    }
+  async function closeFiles() {
+    const failures: unknown[] = [];
+    for (const file of [captureFile, metadataFile])
+      if (file) {
+        try {
+          await bounded(file.close(), "Close capture file", 3000);
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+    captureFile = undefined;
+    metadataFile = undefined;
+    if (failures.length)
+      throw new AggregateError(failures, "Close capture files failed");
   }
-  async function closeServer(): Promise<void> {
+  async function closeServer() {
     if (!serverStarted) return;
     server.closeAllConnections();
     await bounded(
-      new Promise<void>((accept, reject) => {
-        server.close((error) => (error ? reject(error) : accept()));
-      }),
+      new Promise<void>((accept, reject) =>
+        server.close((error) => (error ? reject(error) : accept())),
+      ),
       "Capture server close",
       3000,
     );
     serverStarted = false;
   }
-
   try {
-    await new Promise<void>((accept, reject) => {
-      server.once("error", reject);
-      server.listen(0, "127.0.0.1", () => {
-        server.off("error", reject);
-        accept();
-      });
-    });
-    serverStarted = true;
+    await bounded(
+      new Promise<void>((accept, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          server.off("error", reject);
+          serverStarted = true;
+          accept();
+        });
+      }),
+      "Capture server startup",
+      timeout,
+    );
     const address = server.address();
     if (!address || typeof address === "string")
       throw new Error("Capture server did not bind a loopback port");
-    const uploadUrl = `http://127.0.0.1:${address.port}${uploadRoute}`;
+    const serverOrigin = `http://127.0.0.1:${address.port}`;
     profile = await mkdtemp(join(tmpdir(), "browser-audio-testkit-"));
+    const extension = join(bundle, "extension");
     context = await chromium.launchPersistentContext(profile, {
       channel: "chromium",
       headless: !(options.showBrowser ?? false),
-      // The suite owns signals and flushes recordings before browser process teardown.
       handleSIGINT: false,
       handleSIGTERM: false,
       handleSIGHUP: false,
@@ -170,235 +180,351 @@ export async function createVoiceBrowserSession(
         "--enable-unsafe-extension-debugging",
       ],
     });
-    context.setDefaultTimeout(timeoutMs);
+    const ownedContext = context;
+    context.setDefaultTimeout(timeout);
     await context.addInitScript({ path: join(bundle, "page-media.js") });
-    worker =
-      context.serviceWorkers().find((item) => item.url().startsWith("chrome-extension://")) ??
+    const worker =
+      context
+        .serviceWorkers()
+        .find((item) => item.url().startsWith("chrome-extension://")) ??
       (await context.waitForEvent("serviceworker", {
         predicate: (item) => item.url().startsWith("chrome-extension://"),
       }));
     const page = context.pages()[0] ?? (await context.newPage());
     const browser = context.browser();
     if (!browser) throw new Error("Owned Chromium browser is unavailable");
-    const ownedContext = context;
-    const ownedWorker = worker;
-
-    async function readState(): Promise<VoiceBrowserState> {
-      return await bounded(
-        page.evaluate<VoiceBrowserState>("window.__voiceBrowser.state()"),
-        "Read voice browser state",
-        timeoutMs,
+    await page.goto(serverOrigin + bootstrapRoute);
+    await page.bringToFront();
+    const tab = await worker.evaluate<{ id: number }>(
+      "chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(tabs => tabs[0])",
+    );
+    if (!Number.isInteger(tab?.id))
+      throw new Error("Cannot identify owned capture tab");
+    await worker.evaluate(
+      `voiceRecorder.prepare(${JSON.stringify({ tabId: tab.id, listenLive: options.listenLive ?? false })})`,
+    );
+    const cdp = await browser.newBrowserCDPSession();
+    try {
+      const { targetInfos } = await cdp.send("Target.getTargets", {
+        filter: [{ type: "tab", exclude: false }],
+      });
+      const target = targetInfos.find((item) => item.url === page.url());
+      if (!target) throw new Error("No Chromium tab target matches owned page");
+      await bounded(
+        cdp.send("Extensions.triggerAction", {
+          id: new URL(worker.url()).hostname,
+          targetId: target.targetId,
+        }),
+        "Activate live tab capture (requires full Chromium 153+)",
+        15000,
       );
+    } finally {
+      await cdp.detach();
     }
-    async function recorderStatus(): Promise<RecorderStatus> {
-      return await bounded(
-        ownedWorker.evaluate<RecorderStatus>("voiceRecorder.status()"),
-        "Read recorder state",
-        timeoutMs,
+    type RoutingStatus = {
+      state: string;
+      error?: string;
+      monitorConnected?: boolean;
+    };
+    const status = () =>
+      bounded(
+        worker.evaluate<RoutingStatus>("voiceRecorder.status()"),
+        "Read capture routing",
+        timeout,
       );
+    const deadline = Date.now() + 15000;
+    while (true) {
+      const current = await status();
+      if (current.state === "failed") throw new Error(current.error);
+      if (current.state === "ready") break;
+      if (Date.now() >= deadline)
+        throw new Error("Live capture activation exceeded 15000ms");
+      await sleep(50);
     }
-    async function silencePage(): Promise<void> {
-      if (disposed) return;
-      if (page.isClosed()) {
-        disposed = true;
-        return;
+    const captured = await worker.evaluate<{ tabId: number; status: string }[]>(
+      "chrome.tabCapture.getCapturedTabs()",
+    );
+    if (
+      !captured.some(
+        (item) => item.tabId === tab.id && item.status === "active",
+      )
+    )
+      throw new Error(
+        "Chromium has not activated the owned tab's audio capture",
+      );
+    let environment: "ready" | "failed" | "closing" | "closed" = "ready";
+    let environmentFailure: Error | undefined;
+    let startPromise: Promise<RecordingStarted> | undefined;
+    let stopPromise: Promise<RecordingFinished> | undefined;
+    let closePromise: Promise<void> | undefined;
+    let recordingState:
+      | "idle"
+      | "starting"
+      | "recording"
+      | "finishing"
+      | "finished"
+      | "failed" = "idle";
+    let recordingFailure: unknown;
+    let finished: RecordingFinished | undefined;
+    function lost(message: string) {
+      if (environment !== "ready") return;
+      environment = "failed";
+      environmentFailure = new Error(message);
+      void worker
+        .evaluate(`chrome.tabs.update(${tab.id}, { muted: true })`)
+        .catch(() => page.close().catch(() => undefined));
+    }
+    page.on("close", () =>
+      lost("Owned page closed unexpectedly; live capture was interrupted"),
+    );
+    context.on("close", () =>
+      lost("Owned context closed unexpectedly; live capture was interrupted"),
+    );
+    function ready(label: string) {
+      if (environment !== "ready")
+        throw new Error(`${label}: environment is ${environment}`, {
+          cause: environmentFailure,
+        });
+    }
+    async function available(label: string) {
+      if (environment !== "ready")
+        throw new Error(`${label}: environment is ${environment}`, {
+          cause: environmentFailure,
+        });
+      const current = await status();
+      if (current.state === "failed") {
+        lost(current.error ?? "Live capture lost");
+        throw environmentFailure;
       }
-      try {
-        await bounded(page.evaluate("window.__voiceBrowser?.dispose()"), "Silence test page", 3000);
-        disposed = true;
-        return;
-      } catch (error) {
-        if (tabId === undefined) throw error;
-      }
-      if (tabId !== undefined) {
-        await bounded(
-          ownedWorker.evaluate(`chrome.tabs.update(${tabId}, { muted: true })`),
-          "Mute test tab for teardown",
-          3000,
+      ready(label);
+    }
+    function atOrigin(label: string) {
+      if (new URL(page.url()).origin !== origin)
+        throw new Error(
+          `${label}: navigate the owned page to the configured origin`,
         );
-      }
-      disposed = true;
     }
-    async function stopRecording(): Promise<RecordingMetadata> {
+    async function startRecording(): Promise<RecordingStarted> {
+      ready("Start recording");
+      atOrigin("Start recording");
+      if (recordingState !== "idle")
+        throw new Error("Voice browser recording cannot be started again");
+      // Set accepted startup synchronously before allocating any artifacts.
+      recordingState = "starting";
+      startPromise = (async () => {
+        try {
+          const routing = await status();
+          if (routing.state === "failed") {
+            lost(routing.error ?? "Live capture lost");
+            throw new Error(routing.error ?? "Live capture lost");
+          }
+          await mkdir(outputDir, { recursive: true });
+          metadataFile = await open(
+            join(outputDir, "capture.json"),
+            "wx",
+            0o600,
+          );
+          captureFile = await open(capturePath, "wx", 0o600);
+          const result = await bounded(
+            worker.evaluate<Omit<RecordingStarted, "capturePath">>(
+              `voiceRecorder.start(${JSON.stringify(serverOrigin + uploadRoute)})`,
+            ),
+            "Start live tab recording",
+            15000,
+          );
+          recordingState = "recording";
+          return { ...result, capturePath };
+        } catch (error) {
+          recordingState = "failed";
+          recordingFailure = error;
+          throw error;
+        }
+      })();
+      return await startPromise;
+    }
+    async function stopRecording(): Promise<RecordingFinished> {
+      if (!startPromise) throw new Error("Voice tab recording has not started");
       stopPromise ??= (async () => {
-        if (!started) throw new Error("Voice tab recording has not started");
-        // Chrome resumes tab playback when capture ends. Silence app sources first.
-        await silencePage();
-        const result = await bounded(
-          ownedWorker.evaluate<CaptureMetadata>("voiceRecorder.stop()"),
-          "Flush live tab recording",
-          15000,
-        );
-        if (uploadFailure) throw uploadFailure;
-        if (result.bytes !== bytesReceived || !bytesReceived)
-          throw new Error("Live capture flush did not preserve every recorded byte");
-        await closeCaptureFile(captureFile);
-        recording = { ...result, capturePath };
-        await writeFile(
-          join(outputDir, "capture.json"),
-          `${JSON.stringify(recording, null, 2)}\n`,
-          { mode: 0o600 },
-        );
-        return recording;
+        try {
+          await startPromise;
+          recordingState = "finishing";
+          const result = await bounded(
+            worker.evaluate<Omit<RecordingFinished, "capturePath">>(
+              "voiceRecorder.stop()",
+            ),
+            "Flush live tab recording",
+            15000,
+          );
+          if (environmentFailure) throw environmentFailure;
+          if (uploadFailure) throw uploadFailure;
+          if (!bytesReceived || result.bytes !== bytesReceived)
+            throw new Error(
+              "Live capture flush did not preserve every recorded byte",
+            );
+          if (!captureFile || !metadataFile)
+            throw new Error("Recording files unavailable");
+          await bounded(captureFile.sync(), "Sync capture", 3000);
+          await bounded(captureFile.close(), "Close capture", 3000);
+          captureFile = undefined;
+          const recording: RecordingFinished = { ...result, capturePath };
+          await bounded(
+            metadataFile.writeFile(`${JSON.stringify(recording, null, 2)}\n`),
+            "Persist capture metadata",
+            3000,
+          );
+          await bounded(metadataFile.sync(), "Sync capture metadata", 3000);
+          await bounded(metadataFile.close(), "Close capture metadata", 3000);
+          metadataFile = undefined;
+          recordingState = "finished";
+          finished = recording;
+          return recording;
+        } catch (error) {
+          recordingState = "failed";
+          recordingFailure = error;
+          throw error;
+        }
       })();
       return await stopPromise;
     }
     async function close(): Promise<void> {
       closePromise ??= (async () => {
-        const failures: string[] = [];
-        try {
-          await silencePage();
-        } catch (error) {
-          failures.push(error instanceof Error ? error.message : String(error));
-        }
-        try {
-          let status = await recorderStatus();
-          const startDeadline = Date.now() + 15000;
-          while (status.state === "starting" && Date.now() < startDeadline) {
-            await sleep(50);
-            status = await recorderStatus();
+        environment = "closing";
+        const failures: unknown[] = [];
+        const attempt = async (operation: () => Promise<unknown>) => {
+          try {
+            await operation();
+          } catch (error) {
+            failures.push(error);
           }
-          if (status.state === "recording") {
-            started = true;
-            await stopRecording();
-          } else if (status.state === "starting") {
-            failures.push(
-              "Capture was still starting during teardown; flush could not be established",
-            );
-          } else if (status.state === "failed") failures.push(status.error);
-        } catch (error) {
-          failures.push(error instanceof Error ? error.message : String(error));
+        };
+        // Stop extension monitoring as well as native playback before flushing.
+        await attempt(() =>
+          bounded(
+            worker.evaluate("voiceRecorder.silence()"),
+            "Silence live monitor",
+            3000,
+          ),
+        );
+        // Mute stays in force through capture release, including navigation and missing instrumentation.
+        if (!page.isClosed()) {
+          await attempt(() =>
+            bounded(
+              worker.evaluate(`chrome.tabs.update(${tab.id}, { muted: true })`),
+              "Mute owned tab",
+              3000,
+            ),
+          );
+          await attempt(() =>
+            bounded(
+              page.evaluate("window.__voiceBrowser?.dispose()"),
+              "Silence owned page",
+              3000,
+            ),
+          );
         }
-        try {
+        if (startPromise && !finished) await attempt(() => stopRecording());
+        else if (recordingFailure) failures.push(recordingFailure);
+        if (environmentFailure) failures.push(environmentFailure);
+        await attempt(() =>
+          bounded(
+            worker.evaluate("voiceRecorder.release()"),
+            "Release tab capture",
+            3000,
+          ),
+        );
+        await attempt(async () => {
           await bounded(ownedContext.close(), "Owned browser close", 15000);
           browserClosed = true;
-        } catch (error) {
-          failures.push(error instanceof Error ? error.message : String(error));
-        }
-        try {
-          await closeServer();
-        } catch (error) {
-          failures.push(error instanceof Error ? error.message : String(error));
-        }
-        try {
-          await closeCaptureFile(captureFile);
-        } catch (error) {
-          failures.push(error instanceof Error ? error.message : String(error));
-        }
-        if (profile && browserClosed) {
-          try {
-            await rm(profile, { recursive: true, force: true });
-          } catch (error) {
-            failures.push(error instanceof Error ? error.message : String(error));
-          }
-        }
+        });
+        await attempt(closeServer);
+        await attempt(closeFiles);
+        if (profile && browserClosed)
+          await attempt(() => rm(profile!, { recursive: true, force: true }));
+        environment = "closed";
         if (failures.length)
-          throw new Error(`Voice browser cleanup failed: ${failures.join("; ")}`);
+          throw new AggregateError(
+            failures,
+            `Voice browser cleanup failed: ${failures.map(String).join("; ")}`,
+          );
       })();
       return await closePromise;
     }
-
-    const session: VoiceBrowserSession = {
+    return {
       page,
       context: ownedContext,
-      browserVersion: browser.version(),
       outputDir,
-      async startRecording() {
-        if (started || closePromise)
-          throw new Error("Voice browser recording cannot be started again");
-        if (new URL(page.url()).origin !== origin)
-          throw new Error("Navigate the owned page to the configured origin before recording");
-        await page.bringToFront();
-        const tab = await bounded(
-          ownedWorker.evaluate<{ id: number } | undefined>(
-            // URL is protected before activeTab is granted on named HTTPS origins.
-            // bringToFront identifies the intended active tab without requesting tabs permission.
-            "chrome.tabs.query({ active: true, lastFocusedWindow: true }).then((tabs) => tabs[0])",
-          ),
-          "Identify voice tab",
-          timeoutMs,
+      browserVersion: browser.version(),
+      startRecording,
+      stopRecording,
+      close,
+      async readState() {
+        await available("Read state");
+        return bounded(
+          page.evaluate<VoiceBrowserState>("window.__voiceBrowser.state()"),
+          "Read voice browser state",
+          timeout,
         );
-        if (!tab || !Number.isInteger(tab.id))
-          throw new Error("Recorder extension cannot identify the owned tab");
-        tabId = tab.id;
-        await bounded(
-          ownedWorker.evaluate(
-            `voiceRecorder.prepare(${JSON.stringify({ tabId, uploadUrl, listenLive: options.listenLive ?? false })})`,
+      },
+      async stopPlayback() {
+        await available("Stop playback");
+        return bounded(
+          page.evaluate<VoiceBrowserState>(
+            "window.__voiceBrowser.stopPlayback()",
           ),
-          "Prepare live tab recorder",
-          timeoutMs,
+          "Stop synthetic voice playback",
+          timeout,
         );
-        if (closePromise) throw new Error("Voice browser is closing before capture activation");
-        const cdp = await browser.newBrowserCDPSession();
-        try {
-          const targets = targetsSchema.parse(
-            await cdp.send("Target.getTargets", {
-              filter: [{ type: "tab", exclude: false }],
-            }),
-          );
-          const target = targets.targetInfos.find((item) => item.url === page.url());
-          if (!target) throw new Error("No Chromium tab target matches the owned page");
-          if (closePromise) throw new Error("Voice browser is closing before capture activation");
-          // A real extension action grants activeTab; invoking the JS listener does not.
-          await bounded(
-            cdp.send("Extensions.triggerAction", {
-              id: new URL(ownedWorker.url()).hostname,
-              targetId: target.targetId,
-            }),
-            "Activate live tab capture (requires full Chromium 153+)",
-            timeoutMs,
-          );
-        } finally {
-          await cdp.detach();
-        }
-        const deadline = Date.now() + 15000;
-        while (Date.now() < deadline) {
-          const status = await recorderStatus();
-          if (status.state === "failed") throw new Error(status.error);
-          if (status.state === "recording") {
-            started = true;
-            recording = { ...status, capturePath };
-            const captured = await bounded(
-              ownedWorker.evaluate<{ tabId: number; status: string }[]>(
-                "chrome.tabCapture.getCapturedTabs()",
-              ),
-              "Verify live tab capture",
-              timeoutMs,
-            );
-            if (!captured.some((item) => item.tabId === tabId && item.status === "active")) {
-              throw new Error("Chromium has not activated the owned tab's audio capture");
-            }
-            if (recording.monitorConnected !== (options.listenLive ?? false)) {
-              throw new Error("Tab capture monitoring does not match the requested listening mode");
-            }
-            return recording;
-          }
-          await sleep(50);
-        }
-        throw new Error("Extension action did not start live tab recording within 15000ms");
       },
       async playWav(path, clipOptions = {}) {
-        if (!started || stopPromise || closePromise)
-          throw new Error("Start live tab capture before playing a WAV clip");
+        await available("Play WAV");
+        atOrigin("Play WAV");
+        const base64 = (
+          await bounded(readFile(path), "Read WAV", timeout)
+        ).toString("base64");
+        await available("Play WAV");
+        atOrigin("Play WAV");
+        // A JSHandle is bound to one execution context: it cannot address reused IDs after navigation.
+        const pendingDocument = page.evaluateHandle("window.__voiceBrowser");
+        const document = (await bounded(
+          pendingDocument,
+          "Prepare microphone playback document",
+          timeout,
+        ).catch((error) => {
+          // A late evaluation may still allocate a handle after the caller times out.
+          void pendingDocument.then((handle) => handle.dispose()).catch(() => undefined);
+          throw error;
+        })) as JSHandle<{
+          playWav(input: {
+            id: string;
+            base64: string;
+            requireLiveMicrophone: boolean;
+          }): Promise<ClipPlayback>;
+          completed(id: string): Promise<ClipPlayback>;
+          clip(id: string): ClipPlayback;
+          stopClip(id: string): ClipPlayback;
+        }>;
+        ready("Play WAV");
         const id = clipOptions.id ?? randomUUID();
-        const base64 = (await readFile(path)).toString("base64");
         const clip = await bounded(
-          page.evaluate<ClipPlayback>(
-            `window.__voiceBrowser.playWav(${JSON.stringify({
-              id,
-              base64,
-              requireLiveMicrophone: clipOptions.requireLiveMicrophone ?? false,
-            })})`,
-          ),
+          document.evaluate<
+            ClipPlayback,
+            { id: string; base64: string; requireLiveMicrophone: boolean }
+          >((audio, input) => audio.playWav(input), {
+            id,
+            base64,
+            requireLiveMicrophone: clipOptions.requireLiveMicrophone ?? false,
+          }),
           "Start synthetic microphone clip",
-          timeoutMs,
+          timeout,
         );
         const completed = bounded(
-          page.evaluate<ClipPlayback>(`window.__voiceBrowser.completed(${JSON.stringify(id)})`),
-          "Complete synthetic voice clip",
+          document.evaluate<ClipPlayback, string>(
+            (audio, id) => audio.completed(id),
+            id,
+          ),
+          "Complete synthetic voice clip (document interruption possible)",
           Math.ceil(clip.durationSeconds * 1000) + 10000,
         );
-        // Teardown can reject this pending evaluation; callers still observe the original promise.
         void completed.catch(() => undefined);
         return {
           id,
@@ -407,60 +533,52 @@ export async function createVoiceBrowserSession(
           startedAudioContextSeconds: clip.startedAudioContextSeconds,
           completed,
           async progress() {
-            return await bounded(
-              page.evaluate<ClipPlayback>(`window.__voiceBrowser.clip(${JSON.stringify(id)})`),
-              "Read voice clip progress",
-              timeoutMs,
+            await available("Read clip progress");
+            return bounded(
+              document.evaluate<ClipPlayback, string>(
+                (audio, id) => audio.clip(id),
+                id,
+              ),
+              "Read clip progress (document interruption possible)",
+              timeout,
             );
           },
           async stop() {
-            return await bounded(
-              page.evaluate<ClipPlayback>(`window.__voiceBrowser.stopClip(${JSON.stringify(id)})`),
-              "Stop voice clip",
-              timeoutMs,
+            await available("Stop clip");
+            return bounded(
+              document.evaluate<ClipPlayback, string>(
+                (audio, id) => audio.stopClip(id),
+                id,
+              ),
+              "Stop clip (document interruption possible)",
+              timeout,
             );
           },
         };
       },
-      readState,
-      async stopPlayback() {
-        return await bounded(
-          page.evaluate<VoiceBrowserState>("window.__voiceBrowser.stopPlayback()"),
-          "Stop synthetic voice playback",
-          timeoutMs,
-        );
-      },
-      stopRecording,
-      close,
     };
-    return session;
-  } catch (error) {
-    const failures = [error instanceof Error ? error.message : String(error)];
-    if (context) {
+  } catch (cause) {
+    const failures: unknown[] = [cause];
+    const attempt = async (operation: () => Promise<unknown>) => {
       try {
-        await bounded(context.close(), "Failed browser setup cleanup", 15000);
+        await operation();
+      } catch (error) {
+        failures.push(error);
+      }
+    };
+    if (context)
+      await attempt(async () => {
+        await bounded(context!.close(), "Failed setup browser cleanup", 15000);
         browserClosed = true;
-      } catch (cleanupError) {
-        failures.push(cleanupError instanceof Error ? cleanupError.message : String(cleanupError));
-      }
-    }
-    try {
-      await closeServer();
-    } catch (cleanupError) {
-      failures.push(cleanupError instanceof Error ? cleanupError.message : String(cleanupError));
-    }
-    try {
-      await closeCaptureFile(captureFile);
-    } catch (cleanupError) {
-      failures.push(cleanupError instanceof Error ? cleanupError.message : String(cleanupError));
-    }
-    if (profile && (!context || browserClosed)) {
-      try {
-        await rm(profile, { recursive: true, force: true });
-      } catch (cleanupError) {
-        failures.push(cleanupError instanceof Error ? cleanupError.message : String(cleanupError));
-      }
-    }
-    throw new Error(failures.join("; "), { cause: error });
+      });
+    await attempt(closeServer);
+    await attempt(closeFiles);
+    if (profile && (!context || browserClosed))
+      await attempt(() => rm(profile!, { recursive: true, force: true }));
+    throw new AggregateError(
+      failures,
+      `Voice browser setup failed: ${failures.map(String).join("; ")}`,
+      { cause },
+    );
   }
 }

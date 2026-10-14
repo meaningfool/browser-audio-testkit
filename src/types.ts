@@ -48,7 +48,10 @@ export interface VoiceBrowserState {
   microphoneRequestedAtUnixMs: number | null;
   track: MicrophoneTrack | null;
   microphoneTracks: MicrophoneTrack[];
-  trackTransitions: (MicrophoneTrack & { atUnixMs: number; audioContextSeconds: number })[];
+  trackTransitions: (MicrophoneTrack & {
+    atUnixMs: number;
+    audioContextSeconds: number;
+  })[];
   microphone: AudioMeter;
   incoming: AudioMeter & {
     observedAtUnixMs: number | null;
@@ -74,17 +77,16 @@ export interface PlayWavOptions {
 }
 
 export interface VoiceClip {
-  id: string;
-  durationSeconds: number;
-  startedAtUnixMs: number;
-  startedAudioContextSeconds: number;
-  completed: Promise<ClipPlayback>;
+  readonly id: string;
+  readonly durationSeconds: number;
+  readonly startedAtUnixMs: number;
+  readonly startedAudioContextSeconds: number;
+  readonly completed: Promise<ClipPlayback>;
   progress(): Promise<ClipPlayback>;
   stop(): Promise<ClipPlayback>;
 }
 
-export interface RecordingMetadata {
-  state: "recording" | "finished";
+interface RecordingFields {
   tabId: number;
   mimeType: string;
   monitorConnected: boolean;
@@ -103,22 +105,32 @@ export interface RecordingMetadata {
   }[];
   videoTracks: number;
   startedAtUnixMs: number;
-  stoppedAtUnixMs?: number;
-  chunkCount?: number;
-  bytes?: number;
-  uploadedAtUnixMs?: number;
+  chunkCount: number;
+  bytes: number;
   capturePath: string;
 }
+
+export interface RecordingStarted extends RecordingFields {
+  state: "recording";
+}
+
+export interface RecordingFinished extends RecordingFields {
+  state: "finished";
+  stoppedAtUnixMs: number;
+  uploadedAtUnixMs: number;
+}
+
+export type RecordingMetadata = RecordingStarted | RecordingFinished;
 
 export interface VoiceBrowserSession {
   readonly page: Page;
   readonly context: BrowserContext;
   readonly browserVersion: string;
   readonly outputDir: string;
-  startRecording(): Promise<RecordingMetadata>;
+  startRecording(): Promise<RecordingStarted>;
   playWav(path: string, options?: PlayWavOptions): Promise<VoiceClip>;
   readState(): Promise<VoiceBrowserState>;
   stopPlayback(): Promise<VoiceBrowserState>;
-  stopRecording(): Promise<RecordingMetadata>;
+  stopRecording(): Promise<RecordingFinished>;
   close(): Promise<void>;
 }
