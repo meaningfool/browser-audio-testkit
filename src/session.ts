@@ -357,7 +357,8 @@ export async function createSession(
           // allowance so context/server cleanup still has time to run.
           const releasing = environment === "closing";
           let finishDeadline = Date.now() + 15000;
-          await bounded(startPromise, "Await recording startup", 15000);
+          if (releasing) await bounded(startPromise, "Await recording startup", 15000);
+          else await startPromise;
           if (!releasing) finishDeadline = Date.now() + 15000;
           recordingState = "finishing";
           const finalize = <T>(operation: Promise<T>, label: string, limit: number) =>
