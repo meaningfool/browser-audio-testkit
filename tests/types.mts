@@ -23,3 +23,19 @@ async function consumer(): Promise<void> {
   await session.close();
 }
 void consumer;
+
+import { test, expect, type VoiceBrowserFixtureOptions } from '@meaningfool/browser-audio-testkit/playwright';
+const fixtureOptions: VoiceBrowserFixtureOptions = { origin: 'https://neutral.invalid' };
+// @ts-expect-error Fixture artifact paths belong to the runner, not callers.
+const invalidOutput: VoiceBrowserFixtureOptions = { origin: 'https://neutral.invalid', outputDir: '/tmp/shared' };
+test.use({ voiceBrowserOptions: fixtureOptions });
+const extended = test.extend<{ journey: string }>({
+  journey: async ({ page }, use) => { await use(page.url()); },
+});
+extended('typed fixture', async ({ page, context, voiceBrowser, journey }) => {
+  expect(page).toBe(voiceBrowser.page);
+  expect(context).toBe(voiceBrowser.context);
+  const url: string = journey;
+  console.log(url);
+});
+void invalidOutput;

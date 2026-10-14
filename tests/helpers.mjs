@@ -22,10 +22,16 @@ export async function neutral(session, body = '<!doctype html><body></body>') {
   await session.page.goto('https://neutral.invalid/');
 }
 export async function captureTarget(session) {
+  return extensionTarget(session, 'background_page', '/recorder.html');
+}
+export async function extensionWorkerTarget(session) {
+  return extensionTarget(session, 'service_worker', '/background.js');
+}
+async function extensionTarget(session, type, path) {
   const cdp = await session.context.browser().newBrowserCDPSession();
   const { targetInfos } = await cdp.send('Target.getTargets');
-  const target = targetInfos.find(item => item.type === 'background_page' && item.url.endsWith('/recorder.html'));
-  if (!target) throw new Error('Chromium must expose the active capture document');
+  const target = targetInfos.find(item => item.type === type && item.url.startsWith('chrome-extension://') && item.url.endsWith(path));
+  if (!target) throw new Error(`Chromium must expose the active extension target ${path}`);
   const { sessionId } = await cdp.send('Target.attachToTarget', { targetId: target.targetId, flatten: false });
   let sequence = 0;
   return { cdp, target, async command(method, params) {

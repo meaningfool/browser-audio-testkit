@@ -6,7 +6,43 @@ import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createVoiceBrowserSession } from '@meaningfool/browser-audio-testkit';
-import { neutral, tone } from './helpers.mjs';
+import { neutral, tone, extensionWorkerTarget } from './helpers.mjs';
+
+await test('finish awaits accepted startup within the configured operation bound', { timeout: 60000 }, async () => {
+  const outputDir = await mkdtemp(join(tmpdir(), 'audio-slow-record-start-'));
+  const session = await createVoiceBrowserSession({ origin: 'https://neutral.invalid', outputDir, operationTimeoutMs: 25000 });
+  const worker = await extensionWorkerTarget(session);
+  let start, finish;
+  let paused = false;
+  try {
+    await neutral(session);
+    // Pause the real browser worker at its system boundary. Startup may take
+    // longer than recording flush while remaining inside the caller's bound.
+    await worker.command('Debugger.enable', {});
+    await worker.command('Debugger.pause', {});
+    paused = true;
+    start = session.startRecording();
+    finish = session.stopRecording();
+    void start.catch(() => {});
+    void finish.catch(() => {});
+    await sleep(16500);
+    await worker.command('Debugger.resume', {});
+    paused = false;
+    assert.equal((await start).state, 'recording');
+    const recording = await finish;
+    assert.equal(recording.state, 'finished');
+    assert.ok(recording.bytes > 0);
+    assert.equal(JSON.parse(await readFile(join(outputDir, 'capture.json'), 'utf8')).state, 'finished');
+    await session.close();
+    assert.equal(session.page.isClosed(), true);
+  } finally {
+    if (paused) await worker.command('Debugger.resume', {}).catch(() => {});
+    await Promise.allSettled([start, finish]);
+    await worker.cdp.detach().catch(() => {});
+    await session.close().catch(() => {});
+    await rm(outputDir, { recursive: true, force: true });
+  }
+});
 
 await test('navigation retains the page and recording while stale handles cannot stop reused IDs', { timeout: 60000 }, async () => {
   const outputDir = await mkdtemp(join(tmpdir(), 'audio-navigation-'));
