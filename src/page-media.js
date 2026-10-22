@@ -1,5 +1,5 @@
 // Injected before application code. Only microphone hardware is substituted.
-(() => {
+((captureInput) => {
   if (window.__voiceBrowser) return;
   const NativeAudioContext = window.AudioContext;
   const pageContexts = new Set();
@@ -50,6 +50,7 @@
   let microphoneSamples;
   let microphoneSource;
   const tracks = [];
+  const microphoneSources = new Map();
   const clipRecords = new Map();
   const usedClipIds = new Set();
   const audioElements = new Set();
@@ -68,6 +69,13 @@
       microphoneSilence.offset.value = 0;
       microphoneSilence.connect(destination);
       microphoneSilence.start();
+      microphoneAnalyser = context.createAnalyser();
+      microphoneAnalyser.fftSize = 2048;
+      microphoneSamples = new Float32Array(microphoneAnalyser.fftSize);
+      const sink = context.createGain();
+      sink.gain.value = captureInput === "microphone" ? 1 : 0;
+      microphoneAnalyser.connect(sink);
+      sink.connect(context.destination);
     }
     return context;
   }
@@ -85,6 +93,23 @@
       record.clip.playedSeconds = record.clip.elapsedSeconds;
     }
     return structuredClone(record.clip);
+  }
+  function routeMicrophone() {
+    // Every acquisition receives the same synthetic signal. Route one actual
+    // enabled/live returned track, so repeated acquisitions never amplify it.
+    const track = tracks.findLast((item) => item.enabled && item.readyState === "live");
+    const source = microphoneSources.get(track);
+    if (source !== microphoneSource) {
+      microphoneSource?.disconnect();
+      microphoneSource = source;
+      microphoneSource?.connect(microphoneAnalyser);
+    }
+    for (const [item, node] of microphoneSources) {
+      if (item.readyState === "ended") {
+        node.disconnect();
+        microphoneSources.delete(item);
+      }
+    }
   }
   function sampleTracks() {
     const next = tracks.map((track) => ({
@@ -107,6 +132,7 @@
     }
     state.microphoneTracks = next;
     state.track = next.at(-1) ?? null;
+    routeMicrophone();
     if (!liveMicrophone()) {
       for (const record of clipRecords.values()) {
         const clip = record.clip;
@@ -246,18 +272,10 @@
     state.microphoneRequests++;
     state.microphoneRequestedAtUnixMs = Date.now();
     const stream = destination.stream.clone();
-    stream.getAudioTracks().forEach(observeTrack);
-    microphoneSource?.disconnect();
-    microphoneSource = ctx.createMediaStreamSource(stream);
-    microphoneAnalyser = ctx.createAnalyser();
-    microphoneAnalyser.fftSize = 2048;
-    microphoneSamples = new Float32Array(microphoneAnalyser.fftSize);
-    microphoneSource.connect(microphoneAnalyser);
-    // Consume the returned stream without adding the microphone branch to tab output twice.
-    const silentSink = ctx.createGain();
-    silentSink.gain.value = 0;
-    microphoneAnalyser.connect(silentSink);
-    silentSink.connect(ctx.destination);
+    for (const track of stream.getAudioTracks()) {
+      microphoneSources.set(track, ctx.createMediaStreamSource(new MediaStream([track])));
+      observeTrack(track);
+    }
     return stream;
   };
 
@@ -281,8 +299,9 @@
       const source = ctx.createBufferSource();
       source.buffer = buffer;
       source.connect(destination);
-      // Independent capture sees this live reference branch even after the app stops its mic.
-      source.connect(ctx.destination);
+      // Reference mode retains attempted playback after microphone shutdown.
+      // Microphone mode reaches tab output only through an actual returned track.
+      if (captureInput === "reference") source.connect(ctx.destination);
       let resolve;
       const completed = new Promise((finish) => {
         resolve = finish;
@@ -376,4 +395,4 @@
     },
   };
   timer = setInterval(sample, 20);
-})();
+})

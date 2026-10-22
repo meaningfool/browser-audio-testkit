@@ -69,6 +69,9 @@ export async function createSession(
   const origin = new URL(options.origin).origin;
   if (!/^https?:/.test(origin))
     throw new Error("Voice browser origin must use HTTP or HTTPS");
+  const captureInput = options.captureInput ?? "reference";
+  if (captureInput !== "reference" && captureInput !== "microphone")
+    throw new Error("Voice browser capture input must be reference or microphone");
   const timeout = options.operationTimeoutMs ?? 10000;
   if (!Number.isFinite(timeout) || timeout <= 0 || timeout > 60000)
     throw new Error(
@@ -188,7 +191,10 @@ export async function createSession(
     });
     const ownedContext = context;
     context.setDefaultTimeout(timeout);
-    await prepare(context.addInitScript({ path: join(bundle, "page-media.js") }), "Prepare microphone script");
+    const microphoneScript = await readFile(join(bundle, "page-media.js"), "utf8");
+    await prepare(context.addInitScript({
+      content: `${microphoneScript}(${JSON.stringify(captureInput)});`,
+    }), "Prepare microphone script");
     const worker =
       context
         .serviceWorkers()
@@ -333,14 +339,14 @@ export async function createSession(
           );
           captureFile = await open(capturePath, "wx", 0o600);
           const result = await bounded(
-            worker.evaluate<Omit<RecordingStarted, "capturePath">>(
+            worker.evaluate<Omit<RecordingStarted, "capturePath" | "captureInput">>(
               `voiceRecorder.start(${JSON.stringify(serverOrigin + uploadRoute)})`,
             ),
             "Start live tab recording",
             15000,
           );
           recordingState = "recording";
-          return { ...result, capturePath };
+          return { ...result, capturePath, captureInput };
         } catch (error) {
           recordingState = "failed";
           recordingFailure = error;
@@ -364,7 +370,7 @@ export async function createSession(
           const finalize = <T>(operation: Promise<T>, label: string, limit: number) =>
             bounded(operation, label, Math.max(1, Math.min(limit, finishDeadline - Date.now())));
           const result = await finalize(
-            worker.evaluate<Omit<RecordingFinished, "capturePath">>(
+            worker.evaluate<Omit<RecordingFinished, "capturePath" | "captureInput">>(
               "voiceRecorder.stop()",
             ),
             "Flush live tab recording",
@@ -381,7 +387,7 @@ export async function createSession(
           await finalize(captureFile.sync(), "Sync capture", 3000);
           await finalize(captureFile.close(), "Close capture", 3000);
           captureFile = undefined;
-          const recording: RecordingFinished = { ...result, capturePath };
+          const recording: RecordingFinished = { ...result, capturePath, captureInput };
           await finalize(
             metadataFile.writeFile(`${JSON.stringify(recording, null, 2)}\n`),
             "Persist capture metadata",

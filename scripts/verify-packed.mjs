@@ -30,12 +30,14 @@ try {
   await cp("tests/helpers.mjs", join(consumer, "helpers.mjs"));
   await cp("tests/lifecycle.mjs", join(consumer, "lifecycle.mjs"));
   await cp("tests/consumer.mjs", join(consumer, "consumer.mjs"));
+  await cp("tests/capture-input.mjs", join(consumer, "capture-input.mjs"));
   await cp("tests/failure.mjs", join(consumer, "failure.mjs"));
   await cp("tests/routing.mjs", join(consumer, "routing.mjs"));
   await cp("tests/setup-failure.mjs", join(consumer, "setup-failure.mjs"));
   if (!fixtureOnly) {
     execFileSync(process.execPath, ["--test", "setup-failure.mjs"], { cwd: consumer, stdio: "inherit", timeout: 90000, env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: join(consumer, "absent") } });
     execFileSync(process.execPath, ["--test", "consumer.mjs"], { cwd: consumer, stdio: "inherit", timeout: 90000 });
+    execFileSync(process.execPath, ["--test", "capture-input.mjs"], { cwd: consumer, stdio: "inherit", timeout: 180000 });
     execFileSync(process.execPath, ["--test", "lifecycle.mjs"], { cwd: consumer, stdio: "inherit", timeout: 180000 });
     execFileSync(process.execPath, ["--test", "routing.mjs"], { cwd: consumer, stdio: "inherit", timeout: 180000 });
     execFileSync(process.execPath, ["--test", "failure.mjs"], { cwd: consumer, stdio: "inherit", timeout: 300000 });
