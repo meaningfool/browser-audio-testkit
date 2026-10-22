@@ -11,13 +11,14 @@ first application navigation obeys the listening policy. Recording is optional
 and saves one selected interval. The optional Playwright fixture owns automatic setup
 and release on the same ordinary page.
 
-## Install version 0.1.0
+## Install version 0.2.0
 
-The first distribution is the MIT-licensed tarball on the public
-[GitHub release](https://github.com/meaningfool/browser-audio-testkit/releases/tag/v0.1.0):
+Distributions are MIT-licensed tarballs on public
+[GitHub Releases](https://github.com/meaningfool/browser-audio-testkit/releases).
+For version 0.2.0, after publication:
 
 ```sh
-npm install https://github.com/meaningfool/browser-audio-testkit/releases/download/v0.1.0/meaningfool-browser-audio-testkit-0.1.0.tgz
+npm install https://github.com/meaningfool/browser-audio-testkit/releases/download/v0.2.0/meaningfool-browser-audio-testkit-0.2.0.tgz
 npx playwright install chromium
 ```
 
@@ -35,6 +36,7 @@ import { createVoiceBrowserSession } from "@meaningfool/browser-audio-testkit";
 const session = await createVoiceBrowserSession({
   origin: "https://application.example",
   outputDir: "/absolute/path/to/unique-output",
+  captureInput: "microphone", // Optional; default is "reference".
 });
 try {
   await session.page.goto("https://application.example/");
@@ -100,11 +102,35 @@ options. Additional pages are outside its audio guarantee. Audio-only
 `getUserMedia` requests are substituted; physical devices and video requests
 are unavailable. WAV decoding uses Chromium's `decodeAudioData`.
 
-`VoiceClip` exposes completion, local progress and explicit stop. The microphone
-reference in a capture proves local playback, not receipt by an application or
-provider. `readState()` observes synthetic microphone tracks and the narrow
-MediaStream-backed `<audio>` output scope. Its meters do not certify host sound
-or provider behavior.
+`captureInput` selects the input mixed into the existing tab recorder:
+
+- `"reference"` (default) adds an independent WAV playback branch. The recording
+  includes attempted clips even before microphone acquisition or after the
+  application disables or stops its returned microphone tracks.
+- `"microphone"` routes an actual track returned by the substituted `getUserMedia`
+  call. It uses the most recently acquired enabled, live track, and falls back to
+  an older enabled, live track if needed. Every acquisition receives the same
+  synthetic signal; selecting one track avoids summing duplicate acquisitions.
+  No enabled, live returned track means no microphone audio in the capture. The
+  independent WAV reference branch is disabled. Full navigation resets track
+  selection; the new document must acquire its own microphone.
+
+Both modes retain page/assistant playback in the same tab recording and obey
+`listenLive` before, during and after recording. Mode selection does not allocate
+another recorder. `RecordingMetadata.captureInput` and the saved `capture.json`
+identify the capture point. If the application itself plays its microphone back
+through the tab, that application output is also captured; the library cannot
+separate it from other tab audio. Tracks cloned later by the application are not
+part of the returned-track selection.
+
+`VoiceClip` exposes completion, local progress and explicit stop. Clip timing
+and microphone cutoff observations describe attempted playback in both modes,
+including clips attempted after microphone shutdown. Reference mode proves
+source playback; microphone mode proves local audio from one actual returned
+track. Neither proves application processing, provider receipt, or host speaker
+sound. `readState()` observes synthetic microphone tracks and the narrow
+MediaStream-backed `<audio>` output scope. Its meters do not certify provider
+behavior or physical playback.
 
 ## Playwright fixture
 
@@ -135,7 +161,7 @@ application nor selects clips or starts recording. The origin is required via
 `test.use` or the project's `use.voiceBrowserOptions`.
 
 `VoiceBrowserFixtureOptions` is the core options type excluding `outputDir`:
-origin, showBrowser, listenLive, ignoreHTTPSErrors and operationTimeoutMs.
+origin, showBrowser, listenLive, captureInput, ignoreHTTPSErrors and operationTimeoutMs.
 Only these named options configure the owned environment. Stock storageState,
 device, launch, tracing, video, context, timeouts and baseURL settings are not
 inherited. Always navigate using absolute URLs; authentication, routing and
@@ -181,7 +207,11 @@ sends it to a real WebRTC receiver, verifies continued received silence using
 RTP/sample/concealment statistics, exercises progress and stopping, observes a
 MediaStream-backed audio element, and decodes the actual tab recording with
 `ffmpeg`. An independent 880 Hz page oscillator must also be present in that
-capture. Frequencies emitted before and after the selected interval must remain
+capture. Additional frequency markers verify actual returned-track capture across
+track disable/re-enable/stop, repeated acquisitions, and full navigation, alongside
+independent page output. Disabled or absent microphone frequencies must be absent
+in microphone mode and retained in default reference mode. Repeated acquisitions
+must not double their recorded amplitude. Frequencies emitted before and after the selected interval must remain
 absent after a 250ms source-settling allowance before recording. Checks also cover
 optional recording without artifacts, same/full navigation, document interruption,
 concurrent lifecycle calls including accepted startup longer than the flush budget,
@@ -190,7 +220,7 @@ file-allocation failures, bounded startup with a paused document, missing-browse
 setup and cleanup after consumer failure.
 Silent/live routing is checked through the real browser’s
 WebAudio output connection and native active tab capture, independently of the
-library’s monitoring flag, before first navigation and after finishing. Destroying
+library’s monitoring flag, before first navigation and after finishing in both input modes. Destroying
 the native capture document must mute or close the tab and reject new audio work.
 This is browser routing evidence, not a host speaker
 recording. Tests require `ffmpeg` on PATH and a Chromium download.
@@ -229,15 +259,15 @@ pnpm release:candidate
 
 This checks types, verifies an external installed tarball through the full core
 and fixture suites, builds twice, verifies byte-identical packages and writes
-`release/meaningfool-browser-audio-testkit-0.1.0.tgz` and `release/SHA256SUMS`.
+`release/meaningfool-browser-audio-testkit-0.2.0.tgz` and `release/SHA256SUMS`.
 Neither preparation nor packing publishes anything.
 
 After the reviewed change is merged, create the numbered GitHub release from the
 exact merged commit and upload these two files:
 
 ```sh
-gh release create v0.1.0 release/meaningfool-browser-audio-testkit-0.1.0.tgz release/SHA256SUMS --repo meaningfool/browser-audio-testkit --target MERGED_COMMIT_SHA --title "Browser Audio Testkit 0.1.0" --notes "MIT-licensed explicit API and Playwright fixture. Verified on macOS arm64 with Node 26.0.0, Playwright 1.63.0 and full Chromium 153.0.8010.12."
-pnpm verify:artifact https://github.com/meaningfool/browser-audio-testkit/releases/download/v0.1.0/meaningfool-browser-audio-testkit-0.1.0.tgz
+gh release create v0.2.0 release/meaningfool-browser-audio-testkit-0.2.0.tgz release/SHA256SUMS --repo meaningfool/browser-audio-testkit --target MERGED_COMMIT_SHA --title "Browser Audio Testkit 0.2.0" --notes "Opt-in actual returned-microphone capture, retaining default reference capture and the Playwright fixture. Verified on macOS arm64 with Node 26.0.0, Playwright 1.63.0 and full Chromium 153.0.8010.12."
+pnpm verify:artifact https://github.com/meaningfool/browser-audio-testkit/releases/download/v0.2.0/meaningfool-browser-audio-testkit-0.2.0.tgz
 ```
 
 The final command installs the actual release URL into a new temporary consumer,

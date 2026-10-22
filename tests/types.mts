@@ -1,6 +1,6 @@
 import { createVoiceBrowserSession, type VoiceBrowserSession, type VoiceClip, type RecordingMetadata, type RecordingStarted, type RecordingFinished, type VoiceBrowserState } from '@meaningfool/browser-audio-testkit';
 async function consumer(): Promise<void> {
-  const session: VoiceBrowserSession = await createVoiceBrowserSession({ origin: 'https://neutral.invalid', outputDir: '/tmp/unique-output', operationTimeoutMs: 5000 });
+  const session: VoiceBrowserSession = await createVoiceBrowserSession({ origin: 'https://neutral.invalid', outputDir: '/tmp/unique-output', operationTimeoutMs: 5000, captureInput: 'microphone' });
   const clip: VoiceClip = await session.playWav('/tmp/tone.wav');
   const progress = await clip.progress();
   const state: VoiceBrowserState = await session.readState();
@@ -25,7 +25,10 @@ async function consumer(): Promise<void> {
 void consumer;
 
 import { test, expect, type VoiceBrowserFixtureOptions } from '@meaningfool/browser-audio-testkit/playwright';
-const fixtureOptions: VoiceBrowserFixtureOptions = { origin: 'https://neutral.invalid' };
+const fixtureOptions: VoiceBrowserFixtureOptions = { origin: 'https://neutral.invalid', captureInput: 'microphone' };
+// @ts-expect-error Capture points are explicit supported choices.
+const invalidCapture: VoiceBrowserFixtureOptions = { origin: 'https://neutral.invalid', captureInput: 'anything' };
+void invalidCapture;
 // @ts-expect-error Fixture artifact paths belong to the runner, not callers.
 const invalidOutput: VoiceBrowserFixtureOptions = { origin: 'https://neutral.invalid', outputDir: '/tmp/shared' };
 test.use({ voiceBrowserOptions: fixtureOptions });

@@ -5,6 +5,8 @@ export interface VoiceBrowserOptions {
   outputDir: string;
   showBrowser?: boolean;
   listenLive?: boolean;
+  /** Tab input is the independent WAV reference by default, or an actual returned microphone track. */
+  captureInput?: "reference" | "microphone";
   ignoreHTTPSErrors?: boolean;
   operationTimeoutMs?: number;
 }
@@ -87,6 +89,7 @@ export interface VoiceClip {
 }
 
 interface RecordingFields {
+  captureInput: "reference" | "microphone";
   tabId: number;
   mimeType: string;
   monitorConnected: boolean;

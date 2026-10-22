@@ -6,10 +6,10 @@ import { tmpdir } from 'node:os';
 import { createVoiceBrowserSession } from '@meaningfool/browser-audio-testkit';
 import { captureTarget, neutral, waitFor } from './helpers.mjs';
 
-for (const listenLive of [false, true]) {
-  await test(`native routing exists before navigation and persists after finish, listenLive=${listenLive}`, { timeout: 60000 }, async () => {
+for (const captureInput of ['reference', 'microphone']) for (const listenLive of [false, true]) {
+  await test(`native routing exists before navigation and persists after finish, listenLive=${listenLive}, captureInput=${captureInput}`, { timeout: 60000 }, async () => {
     const outputDir = await mkdtemp(join(tmpdir(), 'audio-routing-'));
-    const session = await createVoiceBrowserSession({ origin: 'https://neutral.invalid', outputDir, listenLive });
+    const session = await createVoiceBrowserSession({ origin: 'https://neutral.invalid', outputDir, listenLive, captureInput });
     const recorder = await captureTarget(session);
     try {
       // Native disconnect(destination) throws when the edge does not exist. This

@@ -12,7 +12,7 @@ const test = voiceTest.extend({
     await use(page);
   },
 });
-test.use({ voiceBrowserOptions: { origin: "https://neutral.invalid" } });
+test.use({ voiceBrowserOptions: { origin: "https://neutral.invalid", captureInput: "microphone" } });
 test.afterEach(async ({ page, voiceBrowser }, testInfo) => {
   await writeFile(testInfo.outputPath("observed.json"), JSON.stringify({
     outputDir: voiceBrowser.outputDir, retry: testInfo.retry, title: testInfo.title,
@@ -59,10 +59,12 @@ test("ordinary journey and option isolation", async ({ page, context, voiceBrows
   expect(await page.evaluate(() => window.consumerOwned)).toBe(true);
   const path = testInfo.outputPath("input.wav");
   await tone(path, 440, 0.25);
+  await page.evaluate(() => navigator.mediaDevices.getUserMedia({ audio: true }));
   await voiceBrowser.startRecording();
   expect((await (await voiceBrowser.playWav(path)).completed).state).toBe("completed");
   const recording = await voiceBrowser.stopRecording();
   expect(recording.state).toBe("finished");
+  expect(recording.captureInput).toBe("microphone");
   expect(recording.bytes).toBeGreaterThan(0);
   expect(JSON.parse(await readFile(join(voiceBrowser.outputDir, "capture.json"), "utf8")).bytes).toBe(recording.bytes);
 });
