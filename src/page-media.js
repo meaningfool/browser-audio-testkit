@@ -188,14 +188,7 @@
     }
   }
   function observeAudio() {
-    for (const element of document.querySelectorAll("audio")) {
-      if (!audioElements.has(element)) {
-        audioElements.add(element);
-        element.addEventListener("playing", () => {
-          state.incoming.playingEvents++;
-        });
-      }
-    }
+    for (const element of document.querySelectorAll("audio")) audioElements.add(element);
     let latest;
     let sourceRms = 0;
     let effectiveRms = 0;
@@ -259,6 +252,15 @@
       updateMeter(state.microphone, liveMicrophone() ? values : { rms: 0, peak: 0 });
     }
   }
+  // `playing` does not bubble, but a document capture listener receives it for every
+  // element in the document, including one that starts before the next sample finds it.
+  document.addEventListener(
+    "playing",
+    (event) => {
+      if (event.target instanceof HTMLAudioElement) state.incoming.playingEvents++;
+    },
+    true,
+  );
   // Non-secure documents (including about:blank) may not expose mediaDevices.
   // Playback stopping and state remain available after leaving the configured origin.
   if (navigator.mediaDevices) navigator.mediaDevices.getUserMedia = async (constraints) => {
