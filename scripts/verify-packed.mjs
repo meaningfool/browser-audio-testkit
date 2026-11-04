@@ -29,6 +29,7 @@ try {
   await cp("tests/fixture-stock.spec.mjs", join(consumer, "fixture-stock.spec.mjs"));
   await cp("tests/helpers.mjs", join(consumer, "helpers.mjs"));
   await cp("tests/lifecycle.mjs", join(consumer, "lifecycle.mjs"));
+  await cp("tests/incoming.mjs", join(consumer, "incoming.mjs"));
   await cp("tests/consumer.mjs", join(consumer, "consumer.mjs"));
   await cp("tests/capture-input.mjs", join(consumer, "capture-input.mjs"));
   await cp("tests/failure.mjs", join(consumer, "failure.mjs"));
@@ -39,6 +40,7 @@ try {
     execFileSync(process.execPath, ["--test", "consumer.mjs"], { cwd: consumer, stdio: "inherit", timeout: 90000 });
     execFileSync(process.execPath, ["--test", "capture-input.mjs"], { cwd: consumer, stdio: "inherit", timeout: 180000 });
     execFileSync(process.execPath, ["--test", "lifecycle.mjs"], { cwd: consumer, stdio: "inherit", timeout: 180000 });
+    execFileSync(process.execPath, ["--test", "incoming.mjs"], { cwd: consumer, stdio: "inherit", timeout: 90000 });
     execFileSync(process.execPath, ["--test", "routing.mjs"], { cwd: consumer, stdio: "inherit", timeout: 180000 });
     execFileSync(process.execPath, ["--test", "failure.mjs"], { cwd: consumer, stdio: "inherit", timeout: 300000 });
   }
