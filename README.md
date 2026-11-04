@@ -11,14 +11,14 @@ first application navigation obeys the listening policy. Recording is optional
 and saves one selected interval. The optional Playwright fixture owns automatic setup
 and release on the same ordinary page.
 
-## Install version 0.2.0
+## Install version 0.2.1
 
 Distributions are MIT-licensed tarballs on public
 [GitHub Releases](https://github.com/meaningfool/browser-audio-testkit/releases).
-For version 0.2.0, after publication:
+For version 0.2.1, after publication:
 
 ```sh
-npm install https://github.com/meaningfool/browser-audio-testkit/releases/download/v0.2.0/meaningfool-browser-audio-testkit-0.2.0.tgz
+npm install https://github.com/meaningfool/browser-audio-testkit/releases/download/v0.2.1/meaningfool-browser-audio-testkit-0.2.1.tgz
 npx playwright install chromium
 ```
 
@@ -129,8 +129,10 @@ including clips attempted after microphone shutdown. Reference mode proves
 source playback; microphone mode proves local audio from one actual returned
 track. Neither proves application processing, provider receipt, or host speaker
 sound. `readState()` observes synthetic microphone tracks and the narrow
-MediaStream-backed `<audio>` output scope. Its meters do not certify provider
-behavior or physical playback.
+MediaStream-backed `<audio>` output scope. `incoming.playingEvents` counts each
+`playing` event of an `<audio>` element in the document from document start,
+including an element that starts before it is first sampled. Its meters do not
+certify provider behavior or physical playback.
 
 ## Playwright fixture
 
@@ -205,7 +207,8 @@ active-recording failure/timeout cleanup, original plus cleanup errors and
 parallel/retry output isolation. Package-owned verification generates a 440 Hz PCM WAV,
 sends it to a real WebRTC receiver, verifies continued received silence using
 RTP/sample/concealment statistics, exercises progress and stopping, observes a
-MediaStream-backed audio element, and decodes the actual tab recording with
+MediaStream-backed audio element, counts each `playing` event once, including one
+that starts before its element is sampled, and decodes the actual tab recording with
 `ffmpeg`. An independent 880 Hz page oscillator must also be present in that
 capture. Additional frequency markers verify actual returned-track capture across
 track disable/re-enable/stop, repeated acquisitions, and full navigation, alongside
@@ -259,15 +262,15 @@ pnpm release:candidate
 
 This checks types, verifies an external installed tarball through the full core
 and fixture suites, builds twice, verifies byte-identical packages and writes
-`release/meaningfool-browser-audio-testkit-0.2.0.tgz` and `release/SHA256SUMS`.
+`release/meaningfool-browser-audio-testkit-0.2.1.tgz` and `release/SHA256SUMS`.
 Neither preparation nor packing publishes anything.
 
 After the reviewed change is merged, create the numbered GitHub release from the
 exact merged commit and upload these two files:
 
 ```sh
-gh release create v0.2.0 release/meaningfool-browser-audio-testkit-0.2.0.tgz release/SHA256SUMS --repo meaningfool/browser-audio-testkit --target MERGED_COMMIT_SHA --title "Browser Audio Testkit 0.2.0" --notes "Opt-in actual returned-microphone capture, retaining default reference capture and the Playwright fixture. Verified on macOS arm64 with Node 26.0.0, Playwright 1.63.0 and full Chromium 153.0.8010.12."
-pnpm verify:artifact https://github.com/meaningfool/browser-audio-testkit/releases/download/v0.2.0/meaningfool-browser-audio-testkit-0.2.0.tgz
+gh release create v0.2.1 release/meaningfool-browser-audio-testkit-0.2.1.tgz release/SHA256SUMS --repo meaningfool/browser-audio-testkit --target MERGED_COMMIT_SHA --title "Browser Audio Testkit 0.2.1" --notes "Bug fix: incoming.playingEvents counts every playing event of a document <audio> element from document start, including an element that starts before it is first sampled. No API change. Verified with Playwright 1.63.0 and full Chromium 153.0.8010.12."
+pnpm verify:artifact https://github.com/meaningfool/browser-audio-testkit/releases/download/v0.2.1/meaningfool-browser-audio-testkit-0.2.1.tgz
 ```
 
 The final command installs the actual release URL into a new temporary consumer,
